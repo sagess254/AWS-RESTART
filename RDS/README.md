@@ -21,14 +21,14 @@ In this project I:
 The web app and `cafe_db` both live on `CafeInstance` in a public subnet.
 
 <!-- Add your screenshot: ![Starting architecture](images/starting-architecture.png) -->
-<img src="images/starting-architecture.png" alt="Starting architecture" width="400">>
+<img src="RDS/images/starting-architecture.png" alt="Starting architecture" width="400">>
 
 ### After migration
 
 The database moves to `CafeDBInstance` (RDS) in a private subnet. Only the café instance can reach it, through a security group rule.
 
 <!-- Add your screenshot: ![Final architecture](images/final-architecture.png) -->
-<img src="images/final-architecture.png" alt="final architecture" width="400">>
+<img src="RDS/images/final_architecture.png" alt="final architecture" width="400">>
 
 | Component | Details |
 |---|---|
