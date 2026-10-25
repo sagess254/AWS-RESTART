@@ -1,162 +1,165 @@
-# Hosting a Web Server on Amazon EC2
+# Migrating a MariaDB Database from EC2 to Amazon RDS (AWS CLI)
 
-A hands-on AWS project where I launched an Apache web server on an Amazon EC2 instance, bootstrapped it with a user data script, opened HTTP access through a security group, scaled the instance, and tested termination protection.
+A hands-on project (completed in an AWS Academy lab environment) where I moved the database of a café web application from a self-managed MariaDB server on EC2 to a managed **Amazon RDS for MariaDB** instance, then monitored it with **Amazon CloudWatch**.
 
-![Web server running](webserver.png)
+## Project Overview
 
-> **Note:** This was built in a temporary lab environment. The public IP shown in the screenshots (`34.212.145.161`) no longer resolves because the instance has been terminated.
+The café web application originally ran its web server and its MariaDB database on the same EC2 instance. That design has a single point of failure and leaves patching, backups, and scaling to the operator.
 
----
+In this project I:
 
-## Table of Contents
-
-1. [Objectives](#objectives)
-2. [Architecture](#architecture)
-3. [Services and Tools](#services-and-tools)
-4. [Implementation Steps](#implementation-steps)
-5. [Bootstrap Script](#bootstrap-script)
-6. [Results](#results)
-7. [Key Learnings](#key-learnings)
-8. [Cost and Cleanup](#cost-and-cleanup)
-9. [Next Steps](#next-steps)
-10. [Author](#author)
-
----
-
-## Objectives
-
-- Launch a web server with termination protection enabled
-- Monitor the EC2 instance
-- Modify the security group to allow HTTP access
-- Resize the EC2 instance to scale
-- Test termination protection
-- Terminate the EC2 instance
+- Provisioned networking and security prerequisites for RDS using the **AWS CLI**
+- Created a private, managed **RDS MariaDB** instance
+- Migrated live application data using `mysqldump` and `mysql`
+- Re-pointed the application to the new database through **AWS Systems Manager Parameter Store**, with no code changes
+- Verified data integrity and monitored the instance with **CloudWatch metrics**
 
 ## Architecture
 
-```
-   Internet (HTTP :80)
-          |
-          v
- +-------------------+
- |  Security Group   |   Inbound: HTTP 80 from 0.0.0.0/0
- +---------+---------+
-           |
-           v
- +-------------------+
- |   EC2 Instance    |   Amazon Linux + Apache (httpd)
- |  (public subnet)  |   Termination protection: ON
- +-------------------+
-```
+### Before migration
 
+The web app and `cafe_db` both live on `CafeInstance` in a public subnet.
 
+<!-- Add your screenshot: ![Starting architecture](images/starting-architecture.png) -->
+<img src="images/starting-architecture.png" alt="Starting architecture" width="400">>
 
-| Component | Choice |
+### After migration
+
+The database moves to `CafeDBInstance` (RDS) in a private subnet. Only the café instance can reach it, through a security group rule.
+
+<!-- Add your screenshot: ![Final architecture](images/final-architecture.png) -->
+<img src="images/final-architecture.png" alt="final architecture" width="400">>
+
+| Component | Details |
 |---|---|
-| AMI | Amazon Linux (Amazon Linux 2023*) |
-| Instance type |  t3.micro initially, resized to t3.small |
-| Network | Default VPC, public subnet, auto-assigned public IP |
-| Storage |  8 GiB gp3 root volume |
-| Security group | Inbound HTTP (80) added after launch |
-| Key pair | Created for SSH access (private key not included in this repo) |
+| VPC | `10.200.0.0/20` |
+| Public subnet | `10.200.0.0/24` (café web app, CLI host) |
+| Private subnet 1 | `10.200.2.0/23` (same AZ as the café instance, hosts RDS) |
+| Private subnet 2 | `10.200.10.0/23` (different AZ, required for the DB subnet group) |
+| DB subnet group | `CafeDB Subnet Group` (spans both private subnets) |
+| Security group | `CafeDatabaseSG`, allows TCP 3306 only from `CafeSecurityGroup` |
+| RDS instance | `CafeDBInstance`, MariaDB 10.11.11, `db.t3.micro`, 20 GB, not publicly accessible |
 
-## Services and Tools
+## Services and Tools Used
 
-- **Amazon EC2**: compute
-- **Amazon VPC and Security Groups**: network access control
-- **Amazon CloudWatch**: instance monitoring
-- **Apache HTTP Server**: web server software
-- **Bash**: user data bootstrap script
+- Amazon RDS (MariaDB)
+- Amazon EC2 and EC2 Instance Connect
+- Amazon VPC (subnets, security groups, DB subnet groups)
+- AWS Systems Manager Parameter Store
+- Amazon CloudWatch
+- AWS CLI
+- `mysqldump` / `mysql` client
 
-## Implementation Steps
 
-### 1. Launch the instance with the Launch Instance Wizard
+### 1. Baseline data
 
-Choices made in the wizard:
+Placed several orders on the café website and recorded the number shown on the **Order History** page, to compare after the migration.
 
-1. **AMI**: Amazon Linux
-2. **Instance type**: t3.micro
-3. **Network settings**: default VPC with a public IP
-4. **IAM role**: none"
-5. **User data**:
+- Orders placed before migration: 1
 
- #!/bin/bash
-yum -y install httpd
-systemctl enable httpd
-systemctl start httpd
-echo '<html><h1>Hello From Your Web Server!</h1></html>' > /var/www/html/index.html
+### 2. Prerequisites with the AWS CLI
 
-6. **Storage options**:  8 GiB disk volume which was resized to 10GB
-7. **Tags**: `Name = Web Server`
-8. **Security group**: initially without HTTP access
-9. **Key pair**: No  existing lab key pair since no SSH was been done in this la
+Connected to the CLI Host with EC2 Instance Connect and ran `aws configure`.
 
-Termination protection was enabled during launch under advanced details.
-
-![Launch wizard](launch.png)
-
-### 2. Monitor the instance
-
-Checked the instance state, status checks and CloudWatch metrics (CPU utilization, network in/out) from the EC2 console.
-
-### 3. Allow HTTP access
-
-The web page would not load at first because the security group had no rule for port 80. I edited the inbound rules to add:
-
-| Type | Protocol | Port | Source |
-|---|---|---|---|
-| HTTP | TCP | 80 | 0.0.0.0/0 |
-
-After saving the rule, the page loaded in the browser.
-
-![Security group](Web Server security group)
-
-### 4. Resize the instance
-
-1. Stopped the instance
-2. Changed the instance type under **Actions > Instance settings > Change instance type**
-3. Started the instance again
-
-Note that the public IP can change after a stop and start unless an Elastic IP is attached.
-
-![Resize instance](screenshots/05-resize-instance.png)
-
-### 5. Test termination protection
-
-Attempted to terminate the instance while protection was enabled. AWS blocked the action. I then disabled termination protection under **Actions > Instance settings > Change termination protection** and terminated the instance.
-
-![Termination protection](screenshots/04-termination-protection.png)
-
-## Bootstrap Script
-
-The script in [`user-data.sh`](user-data.sh) runs automatically on first boot, installs Apache and publishes a simple page:
+**Create the database security group and allow MySQL only from the café instance's security group:**
 
 ```bash
-#!/bin/bash
-yum -y install httpd
-systemctl enable httpd
-systemctl start httpd
-echo '<html><h1>Hello From Your Web Server!</h1></html>' > /var/www/html/index.html
+aws ec2 create-security-group \
+  --group-name CafeDatabaseSG \
+  --description "Security group for Cafe database" \
+  --vpc-id <vpc-id>
+
+aws ec2 authorize-security-group-ingress \
+  --group-id <cafe-database-sg-id> \
+  --protocol tcp --port 3306 \
+  --source-group <cafe-security-group-id>
 ```
 
+**Create two private subnets in different Availability Zones:**
 
+```bash
+aws ec2 create-subnet --vpc-id <vpc-id> \
+  --cidr-block 10.200.2.0/23 --availability-zone <cafe-instance-az>
 
-## Results
+aws ec2 create-subnet --vpc-id <vpc-id> \
+  --cidr-block 10.200.10.0/23 --availability-zone <different-az>
+```
 
-Browsing to the instance's public IP over HTTP returned the page **"Hello From Your Web Server!"**, confirming that the bootstrap script, Apache, and the security group were all configured correctly.
+**Group them into a DB subnet group:**
 
-## Key Learnings
+```bash
+aws rds create-db-subnet-group \
+  --db-subnet-group-name "CafeDB Subnet Group" \
+  --db-subnet-group-description "DB subnet group for Cafe" \
+  --subnet-ids <private-subnet-1-id> <private-subnet-2-id>
+```
 
-- User data lets you configure a server automatically at launch, with no manual SSH setup.
-- Security groups block all inbound traffic by default, so a missing port 80 rule is the first thing to check when a web server is unreachable.
-- Instances must be stopped before changing their type, which means brief downtime and a possible public IP change.
-- Termination protection is a simple safeguard against accidental deletion of important instances.
-- Browsers flag plain HTTP as "Not Secure". A production setup would use HTTPS with a certificate.
+### 3. Create the RDS instance
 
-## Cost and Cleanup
+```bash
+aws rds create-db-instance \
+  --db-instance-identifier CafeDBInstance \
+  --engine mariadb \
+  --engine-version 10.11.14 \
+  --db-instance-class db.t3.micro \
+  --allocated-storage 20 \
+  --availability-zone <cafe-instance-az> \
+  --db-subnet-group-name "CafeDB Subnet Group" \
+  --vpc-security-group-ids <cafe-database-sg-id> \
+  --no-publicly-accessible \
+  --master-username root \
+  --master-user-password '<your-db-password>'
+```
 
-The instance was terminated at the end of the lab so that no further charges accrue. Always terminate unused resources and check for leftover volumes and Elastic IPs.
+Polled the status until it reached `available`, then recorded the endpoint:
 
+```bash
+aws rds describe-db-instances \
+  --db-instance-identifier CafeDBInstance \
+  --query "DBInstances[*].[Endpoint.Address,AvailabilityZone,PreferredBackupWindow,BackupRetentionPeriod,DBInstanceStatus]"
+```
+
+### 4. Migrate the data
+
+From the café instance:
+
+```bash
+# Back up the local database
+mysqldump --user=root --password='<local-db-password>' \
+  --databases cafe_db --add-drop-database > cafedb-backup.sql
+
+# Download the RDS CA bundle (RDS requires TLS by default)
+curl -o global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+# Restore into RDS
+mysql --user=root --password='<your-db-password>' \
+  --host=<rds-endpoint> \
+  --ssl-ca=./global-bundle.pem \
+  < cafedb-backup.sql
+```
+
+Verified the import:
+
+```bash
+mysql --user=root --password='<your-db-password>' \
+  --host=<rds-endpoint> --ssl-ca=./global-bundle.pem cafe_db
+```
+```sql
+select * from product;
+```
+
+### 5. Point the application at RDS
+
+Updated the `/cafe/dbUrl` parameter in **Systems Manager Parameter Store** to the RDS endpoint. Because the application read its database location from configuration, no code changes or redeployment were needed.
+
+### 6. Verify
+
+- Orders shown in Order History after migration: 1
+- Result: `<matches the baseline / does not match>`
+
+### 7. Monitor with CloudWatch
+
+In the RDS console's **Monitoring** tab I reviewed metrics including `CPUUtilization`, `DatabaseConnections`, `FreeStorageSpace`, `FreeableMemory`, `ReadIOPS`, and `WriteIOPS`. I opened a MySQL session from the café instance and watched `DatabaseConnections` rise to 1, then return to 0 after exiting.
 
 
 
